@@ -10,6 +10,7 @@ extern "C" {
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <math.h>       /* log2 */
 
 /* A structure to return information about the currect simulator state */
 typedef struct {
