@@ -3,6 +3,8 @@
 
 #include "bp_api.h"
 #include <stdlib.h>
+#include <iostream> 
+
 
 #define not_using_share 0
 #define using_share_lsb 1
@@ -357,7 +359,7 @@ public:
 	
 	virtual bool readStatePredict(uint32_t pc, uint32_t history) = 0;
 	virtual void updateState(uint32_t pc, uint32_t history, bool taken) = 0;
-	virtual void restartState(uint32_t pc, uint32_t history) = 0;
+	virtual void restartState(uint32_t pc) = 0;
 
 	FSM();
 	virtual ~FSM();
@@ -382,7 +384,7 @@ public:
 
 	virtual bool readStatePredict(uint32_t pc, uint32_t history);
 	virtual void updateState(uint32_t pc, uint32_t history, bool taken);
-	virtual void restartState(uint32_t pc, uint32_t history);
+	virtual void restartState(uint32_t pc);
 
 	FSM_local (unsigned btbSize,unsigned historySize,unsigned tagSize,unsigned fsmState);
 	~FSM_local ();
@@ -444,12 +446,14 @@ void FSM_local::updateState(uint32_t pc, uint32_t history, bool taken)
 }
 
 
-void FSM_local::restartState(uint32_t pc, uint32_t history)
+void FSM_local::restartState(uint32_t pc)
 {
 	// extract the entry number in the BTB table
 	uint32_t entry = extract_entry_number(pc,btbSize,tagSize);
-	FSM_table[entry][history] = fsmState;
-
+	for (int h = 0; h < 1<<historySize; h++)
+	{
+		FSM_table[entry][h] = fsmState;
+	}
 }
 
 // =================== FSM global ==========================
@@ -461,7 +465,7 @@ public:
 
 	virtual bool readStatePredict(uint32_t pc, uint32_t history); // TO DO
 	virtual void updateState(uint32_t pc, uint32_t history, bool taken);
-	virtual void restartState(uint32_t pc, uint32_t history);
+	virtual void restartState(uint32_t pc);
 
 	FSM_global (unsigned btbSize_,unsigned historySize_,unsigned tagSize_,unsigned fsmState_);
 	~FSM_global ();
@@ -495,18 +499,24 @@ bool FSM_global::readStatePredict(uint32_t pc, uint32_t history)
 void FSM_global::updateState(uint32_t pc, uint32_t history, bool taken)
 {
 	unsigned tmp_state = FSM_table[history];
+
+	//std::cout << "the history is: " << std::hex << history <<
+	//		", the state before is: " << tmp_state;
+
 	if(taken)
 		tmp_state = (tmp_state>2) ? tmp_state : tmp_state+1;	
 	else
 		tmp_state = (tmp_state<1) ? tmp_state : tmp_state-1;
 	
 	FSM_table[history] = tmp_state;
+
+	//std::cout << ", the state after is: " << tmp_state << " " << std::endl;
 }
 
 
-void FSM_global::restartState(uint32_t pc, uint32_t history)
+void FSM_global::restartState(uint32_t pc)
 {
-	FSM_table[history] = fsmState;
+
 }
 
 
@@ -584,7 +594,7 @@ int BP_init(unsigned btbSize, unsigned historySize, unsigned tagSize, unsigned f
 	MyPred = new Pred (btbSize, historySize, tagSize, fsmState,
 		isGlobalHist, isGlobalTable, isShare);
 
-	return -1;
+	return 0;
 }
 
 bool BP_predict(uint32_t pc, uint32_t *dst){
@@ -617,15 +627,39 @@ void BP_update(uint32_t pc, uint32_t targetPc, bool taken, uint32_t pred_dst){
 	//update the flush counter
 	uint32_t tmp_target = MyPred->pBTB->readTarget(pc);
 	uint32_t tmp_history = MyPred->pBTB->readHistory(pc);
+
 	bool tmp_taken = MyPred->pFSM->readStatePredict(pc,tmp_history);
 
-	if (tmp_target != targetPc || tmp_taken != taken)
-		MyPred->counter_flush++;
 
+	if(tmp_taken != taken) // predict != reality
+	{
+		if(tmp_taken == true) // predict - T, reality - NT
+		{
+			if(pc+4!=tmp_target)
+				MyPred->counter_flush++;
+			
+			//else - not flush
+		}
+		else // predict - NT, reality - T
+		{
+			if(targetPc!=pc+4)
+				MyPred->counter_flush++;
+		}
+	}
+	else // predict = reality
+	{
+		 if( taken == true) // predict = reality - T
+		 {
+			 if(targetPc != tmp_target)
+			 	MyPred->counter_flush++;
+		 }
+	}
 	//if the branch is not in the BTB
 	if(MyPred->pBTB->readHistory(pc)==NOT_in_BTB)
+	{
 		MyPred->pBTB->addBranch(pc,targetPc); 	//add new branch
-
+		MyPred->pFSM->restartState(pc); // only for local FSM tables
+	}
 	MyPred->pBTB->updateHistory(pc, taken);
 	MyPred->pBTB->updateTarget(pc, targetPc);
 	MyPred->pFSM->updateState(pc, tmp_history,taken);	
@@ -634,6 +668,29 @@ void BP_update(uint32_t pc, uint32_t targetPc, bool taken, uint32_t pred_dst){
 }
 
 void BP_GetStats(SIM_stats *curStats){
+	curStats->br_num = MyPred->counter_branch;
+	curStats->flush_num = MyPred->counter_flush;
+
+	unsigned BTB_size;
+	unsigned FSM_size;
+
+	unsigned valid = 0;
+	unsigned targetSize = 30;
+	unsigned FSM_num_bits = 2;
+
+	if(MyPred->isGlobalHist==false)
+		BTB_size = MyPred->btbSize*(valid+MyPred->tagSize+MyPred->historySize+targetSize); //local history
+	else
+		BTB_size = MyPred->btbSize*(valid+MyPred->tagSize+targetSize)+MyPred->historySize; // global history
+
+	if(MyPred->isGlobalTable==false)
+		FSM_size = MyPred->btbSize*(1<<MyPred->historySize)*FSM_num_bits; //local fsm tables
+	else
+		FSM_size = (1<<MyPred->historySize)*FSM_num_bits; //global fsm tables
+
+	curStats->size = BTB_size + FSM_size;
+
+
 	return;
 }
 
